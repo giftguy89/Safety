@@ -1,0 +1,995 @@
+```react
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+  Calculator, 
+  TrendingUp, 
+  Scale, 
+  History, 
+  RotateCcw, 
+  Delete, 
+  Sun, 
+  Moon, 
+  ChevronRight, 
+  Info,
+  Maximize2,
+  ZoomIn,
+  ZoomOut
+} from 'lucide-react';
+
+export default function App() {
+  // 테마 상태 (기본 다크)
+  const [isDarkMode, setIsDarkMode] = useState(true);
+  // 활성 탭: 'calc' (계산기), 'graph' (그래프), 'converter' (변환기)
+  const [activeTab, setActiveTab] = useState('calc');
+  
+  // 계산기 상태
+  const [display, setDisplay] = useState('');
+  const [formula, setFormula] = useState('');
+  const [isRad, setIsRad] = useState(true); // DEG / RAD 설정
+  const [memory, setMemory] = useState(0);
+  const [history, setHistory] = useState([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [calcError, setCalcError] = useState('');
+
+  // 그래프 상태
+  const [graphEquation, setGraphEquation] = useState('sin(x)');
+  const [graphZoom, setGraphZoom] = useState(40); // 픽셀당 단위 크기
+  const [graphOffset, setGraphOffset] = useState({ x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  const canvasRef = useRef(null);
+
+  // 단위 변환기 상태
+  const [converterType, setConverterType] = useState('length'); // length, weight, area, temp
+  const [convertFrom, setConvertFrom] = useState('');
+  const [convertFromUnit, setConvertFromUnit] = useState('m');
+  const [convertToUnit, setConvertToUnit] = useState('cm');
+  const [convertResult, setConvertResult] = useState('');
+
+  // 알림 메시지 상태 (custom Toast 대체)
+  const [toastMessage, setToastMessage] = useState('');
+
+  const showToast = (msg) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(''), 3000);
+  };
+
+  // --- 1. 수학식 안전 평가 엔진 (Tokenizer + Parser) ---
+  // Math.js 등의 외부 라이브러리 없이 순수 JS로 구현한 안전한 수식 파서
+  const evaluateExpression = (expr, xValue = null) => {
+    try {
+      // 공백 제거 및 토큰 치환
+      let s = expr
+        .replace(/×/g, '*')
+        .replace(/÷/g, '/')
+        .replace(/π/g, Math.PI.toString())
+        .replace(/e/g, Math.E.toString());
+
+      // 그래프 모드일 때 x 대입
+      if (xValue !== null) {
+        // x 앞뒤에 연산자가 생략된 경우 보정 (예: 2x -> 2*x)
+        s = s.replace(/(\d)(x)/g, '$1*$2');
+        s = s.replace(/(x)(\d)/g, '$1*$2');
+        s = s.replaceAll('x', `(${xValue})`);
+      }
+
+      // 수학 함수 패턴 정의 및 바인딩
+      const mathFunctions = {
+        'asin': (v) => isRad ? Math.asin(v) : Math.asin(v) * (180 / Math.PI),
+        'acos': (v) => isRad ? Math.acos(v) : Math.acos(v) * (180 / Math.PI),
+        'atan': (v) => isRad ? Math.atan(v) : Math.atan(v) * (180 / Math.PI),
+        'sin': (v) => Math.sin(isRad ? v : v * (Math.PI / 180)),
+        'cos': (v) => Math.cos(isRad ? v : v * (Math.PI / 180)),
+        'tan': (v) => Math.tan(isRad ? v : v * (Math.PI / 180)),
+        'ln': (v) => Math.log(v),
+        'log': (v) => Math.log10(v),
+        'sqrt': (v) => Math.sqrt(v),
+        'cbrt': (v) => Math.cbrt(v),
+        'abs': (v) => Math.abs(v),
+        'exp': (v) => Math.exp(v)
+      };
+
+      // 재귀식 수식 파서 구현
+      const parse = (str) => {
+        str = str.trim();
+        
+        // 괄호 짝 맞추기 보정
+        let openCount = (str.match(/\(/g) || []).length;
+        let closeCount = (str.match(/\)/g) || []).length;
+        while (openCount > closeCount) {
+          str += ')';
+          closeCount++;
+        }
+
+        // 최외각 괄호 제거 (예: (1+2) -> 1+2)
+        if (str.startsWith('(') && str.endsWith(')')) {
+          let depth = 0;
+          let matchAll = true;
+          for (let i = 0; i < str.length - 1; i++) {
+            if (str[i] === '(') depth++;
+            if (str[i] === ')') depth--;
+            if (depth === 0 && i > 0) {
+              matchAll = false;
+              break;
+            }
+          }
+          if (matchAll) {
+            return parse(str.substring(1, str.length - 1));
+          }
+        }
+
+        // 더하기/빼기 분할 (연산 우선순위가 가장 낮으므로 먼저 분할)
+        let depth = 0;
+        for (let i = str.length - 1; i >= 0; i--) {
+          const char = str[i];
+          if (char === ')') depth++;
+          if (char === '(') depth--;
+          if (depth === 0) {
+            if ((char === '+' || char === '-') && i > 0 && !['+', '-', '*', '/', '^'].includes(str[i-1])) {
+              const left = str.substring(0, i);
+              const right = str.substring(i + 1);
+              return char === '+' ? parse(left) + parse(right) : parse(left) - parse(right);
+            }
+          }
+        }
+
+        // 곱하기/나누기 분할
+        depth = 0;
+        for (let i = str.length - 1; i >= 0; i--) {
+          const char = str[i];
+          if (char === ')') depth++;
+          if (char === '(') depth--;
+          if (depth === 0) {
+            if (char === '*' || char === '/') {
+              const left = str.substring(0, i);
+              const right = str.substring(i + 1);
+              return char === '*' ? parse(left) * parse(right) : parse(left) / parse(right);
+            }
+          }
+        }
+
+        // 지수 연산 (x^y) 분할
+        depth = 0;
+        for (let i = str.length - 1; i >= 0; i--) {
+          const char = str[i];
+          if (char === ')') depth++;
+          if (char === '(') depth--;
+          if (depth === 0) {
+            if (char === '^') {
+              const left = str.substring(0, i);
+              const right = str.substring(i + 1);
+              return Math.pow(parse(left), parse(right));
+            }
+          }
+        }
+
+        // 단항 음수/양수 처리
+        if (str.startsWith('-')) {
+          return -parse(str.substring(1));
+        }
+        if (str.startsWith('+')) {
+          return parse(str.substring(1));
+        }
+
+        // 팩토리얼 처리 (숫자!)
+        if (str.endsWith('!')) {
+          const val = parse(str.substring(0, str.length - 1));
+          const factorial = (n) => {
+            if (n < 0 || !Number.isInteger(n)) return NaN;
+            if (n === 0 || n === 1) return 1;
+            let res = 1;
+            for (let i = 2; i <= n; i++) res *= i;
+            return res;
+          };
+          return factorial(val);
+        }
+
+        // 함수 처리 (예: sin(...), log(...))
+        for (const [fnName, fnFunc] of Object.entries(mathFunctions)) {
+          if (str.startsWith(fnName + '(') && str.endsWith(')')) {
+            const innerArg = str.substring(fnName.length + 1, str.length - 1);
+            return fnFunc(parse(innerArg));
+          }
+        }
+
+        // 숫자 값 변환
+        const parsedNum = parseFloat(str);
+        if (isNaN(parsedNum)) {
+          throw new Error('올바르지 않은 식');
+        }
+        return parsedNum;
+      };
+
+      const result = parse(s);
+      if (isNaN(result) || !isFinite(result)) {
+        throw new Error('연산 불가');
+      }
+      return result;
+    } catch (err) {
+      throw err;
+    }
+  };
+
+  // --- 계산기 조작 로직 ---
+  const handleKey = (key) => {
+    setCalcError('');
+    if (key === 'AC') {
+      setDisplay('');
+      setFormula('');
+    } else if (key === 'C' || key === 'Del') {
+      setDisplay(prev => prev.slice(0, -1));
+    } else if (key === '=') {
+      try {
+        if (!display) return;
+        const res = evaluateExpression(display);
+        // 부동 소수점 자릿수 정리 (최대 10자리)
+        const roundedRes = Math.round(res * 1e10) / 1e10;
+        setFormula(display + ' =');
+        setDisplay(roundedRes.toString());
+        setHistory(prev => [{ formula: display, result: roundedRes.toString() }, ...prev.slice(0, 49)]);
+      } catch (err) {
+        setCalcError(err.message || '에러');
+      }
+    } else if (['sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'ln', 'log', 'sqrt', 'cbrt', 'abs'].includes(key)) {
+      setDisplay(prev => prev + key + '(');
+    } else if (key === 'x²') {
+      setDisplay(prev => prev + '^2');
+    } else if (key === 'x³') {
+      setDisplay(prev => prev + '^3');
+    } else if (key === 'x^y') {
+      setDisplay(prev => prev + '^');
+    } else if (key === '1/x') {
+      setDisplay(prev => prev + '1/');
+    } else if (key === 'e^x') {
+      setDisplay(prev => prev + 'e^');
+    } else if (key === '10^x') {
+      setDisplay(prev => prev + '10^');
+    } else if (key === 'M+') {
+      try {
+        const val = evaluateExpression(display || '0');
+        setMemory(prev => prev + val);
+        showToast(`메모리에 더해짐: +${val}`);
+      } catch {
+        setCalcError('계산 불가 값');
+      }
+    } else if (key === 'M-') {
+      try {
+        const val = evaluateExpression(display || '0');
+        setMemory(prev => prev - val);
+        showToast(`메모리에서 빼짐: -${val}`);
+      } catch {
+        setCalcError('계산 불가 값');
+      }
+    } else if (key === 'MS') {
+      try {
+        const val = evaluateExpression(display || '0');
+        setMemory(val);
+        showToast(`메모리 설정: ${val}`);
+      } catch {
+        setCalcError('계산 불가 값');
+      }
+    } else if (key === 'MR') {
+      setDisplay(prev => prev + memory.toString());
+    } else if (key === 'MC') {
+      setMemory(0);
+      showToast('메모리 초기화 완료');
+    } else {
+      // 일반 숫자 및 기본 연산자
+      setDisplay(prev => prev + key);
+    }
+  };
+
+  // 키보드 매핑 기능 지원
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (activeTab !== 'calc') return;
+      if (e.key >= '0' && e.key <= '9') handleKey(e.key);
+      else if (e.key === '.') handleKey('.');
+      else if (e.key === '+') handleKey('+');
+      else if (e.key === '-') handleKey('-');
+      else if (e.key === '*') handleKey('×');
+      else if (e.key === '/') handleKey('÷');
+      else if (e.key === 'Enter' || e.key === '=') handleKey('=');
+      else if (e.key === 'Escape') handleKey('AC');
+      else if (e.key === 'Backspace') handleKey('C');
+      else if (e.key === '(' || e.key === ')') handleKey(e.key);
+      else if (e.key === '^') handleKey('x^y');
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [display, activeTab, memory]);
+
+  // --- 2. 2D 그래프 드로잉 로직 ---
+  const drawGraph = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const width = canvas.width;
+    const height = canvas.height;
+
+    // 배경 지우기
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = isDarkMode ? '#1e293b' : '#f8fafc';
+    ctx.fillRect(0, 0, width, height);
+
+    const originX = width / 2 + graphOffset.x;
+    const originY = height / 2 + graphOffset.y;
+
+    // 그리드 라인 그리기
+    ctx.strokeStyle = isDarkMode ? '#334155' : '#e2e8f0';
+    ctx.lineWidth = 1;
+    ctx.font = '10px sans-serif';
+    ctx.fillStyle = isDarkMode ? '#94a3b8' : '#64748b';
+
+    // 세로 그리드 & X축 레이블
+    const step = graphZoom;
+    const xStart = Math.floor(-originX / step) * step;
+    for (let x = xStart; x < width - originX; x += step) {
+      const px = originX + x;
+      ctx.beginPath();
+      ctx.moveTo(px, 0);
+      ctx.lineTo(px, height);
+      ctx.stroke();
+
+      const val = (x / step).toFixed(1);
+      if (parseFloat(val) !== 0) {
+        ctx.fillText(val, px + 2, originY - 5);
+      }
+    }
+
+    // 가로 그리드 & Y축 레이블
+    const yStart = Math.floor(-originY / step) * step;
+    for (let y = yStart; y < height - originY; y += step) {
+      const py = originY + y;
+      ctx.beginPath();
+      ctx.moveTo(0, py);
+      ctx.lineTo(width, py);
+      ctx.stroke();
+
+      const val = (-y / step).toFixed(1);
+      if (parseFloat(val) !== 0) {
+        ctx.fillText(val, originX + 5, py - 2);
+      }
+    }
+
+    // 메인 축 그리기 (X축, Y축)
+    ctx.strokeStyle = isDarkMode ? '#f1f5f9' : '#0f172a';
+    ctx.lineWidth = 2;
+    // X축
+    ctx.beginPath();
+    ctx.moveTo(0, originY);
+    ctx.lineTo(width, originY);
+    ctx.stroke();
+    // Y축
+    ctx.beginPath();
+    ctx.moveTo(originX, 0);
+    ctx.lineTo(originX, height);
+    ctx.stroke();
+    // 원점 레이블
+    ctx.fillText('0', originX + 5, originY - 5);
+
+    // 수식 대입 및 그래프 선 그리기
+    ctx.strokeStyle = '#3b82f6'; // 메인 파란색 그래프 선
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+
+    let started = false;
+    // 픽셀 정밀도를 높이기 위해 x축으로 1px 간격으로 렌더링
+    for (let px = 0; px < width; px++) {
+      const xValue = (px - originX) / graphZoom;
+      try {
+        const yValue = evaluateExpression(graphEquation, xValue);
+        const py = originY - yValue * graphZoom;
+
+        // 캔버스 내부에 안전하게 그려질 때만 연결
+        if (!isNaN(py) && isFinite(py) && py >= -100 && py <= height + 100) {
+          if (!started) {
+            ctx.moveTo(px, py);
+            started = true;
+          } else {
+            ctx.lineTo(px, py);
+          }
+        } else {
+          started = false;
+        }
+      } catch {
+        started = false; // 에러 구간은 끊어서 표기
+      }
+    }
+    ctx.stroke();
+  };
+
+  // 그래프 리사이즈 및 업데이트 트리거
+  useEffect(() => {
+    if (activeTab === 'graph') {
+      const handleResize = () => {
+        const canvas = canvasRef.current;
+        if (canvas && canvas.parentElement) {
+          canvas.width = canvas.parentElement.clientWidth;
+          canvas.height = Math.max(350, canvas.parentElement.clientHeight - 60);
+          drawGraph();
+        }
+      };
+      window.addEventListener('resize', handleResize);
+      handleResize(); // 최초 실행
+      return () => window.removeEventListener('resize', handleResize);
+    }
+  }, [activeTab, graphEquation, graphZoom, graphOffset, isDarkMode, isRad]);
+
+  // 마우스/터치를 이용한 그래프 패닝(드래그) 구현
+  const handleMouseDown = (e) => {
+    setIsDragging(true);
+    setDragStart({ x: e.clientX - graphOffset.x, y: e.clientY - graphOffset.y });
+  };
+
+  const handleMouseMove = (e) => {
+    if (!isDragging) return;
+    setGraphOffset({
+      x: e.clientX - dragStart.x,
+      y: e.clientY - dragStart.y
+    });
+  };
+
+  const handleMouseUp = () => {
+    setIsDragging(false);
+  };
+
+  const handleTouchStart = (e) => {
+    if (e.touches.length === 1) {
+      setIsDragging(true);
+      setDragStart({
+        x: e.touches[0].clientX - graphOffset.x,
+        y: e.touches[0].clientY - graphOffset.y
+      });
+    }
+  };
+
+  const handleTouchMove = (e) => {
+    if (!isDragging || e.touches.length !== 1) return;
+    setGraphOffset({
+      x: e.touches[0].clientX - dragStart.x,
+      y: e.touches[0].clientY - dragStart.y
+    });
+  };
+
+  // --- 3. 단위 변환기 로직 ---
+  // 단위 테이블 정의
+  const conversionRates = {
+    length: {
+      m: 1,
+      cm: 100,
+      mm: 1000,
+      km: 0.001,
+      inch: 39.3701,
+      ft: 3.28084,
+      yd: 1.09361,
+      mile: 0.000621371
+    },
+    weight: {
+      kg: 1,
+      g: 1000,
+      mg: 1000000,
+      lb: 2.20462,
+      oz: 35.274
+    },
+    area: {
+      m2: 1,
+      cm2: 10000,
+      km2: 0.000001,
+      ha: 0.0001,
+      acre: 0.000247105,
+      pyeong: 0.3025 // 평(한국식 단위)
+    }
+  };
+
+  const handleConvert = (value, fromUnit, toUnit, type) => {
+    if (!value || isNaN(value)) {
+      setConvertResult('');
+      return;
+    }
+
+    const numVal = parseFloat(value);
+
+    // 온도는 수식 처리가 따로 필요함
+    if (type === 'temp') {
+      let tempInC = numVal;
+      if (fromUnit === 'F') tempInC = (numVal - 32) * 5/9;
+      if (fromUnit === 'K') tempInC = numVal - 273.15;
+
+      let targetVal = tempInC;
+      if (toUnit === 'F') targetVal = (tempInC * 9/5) + 32;
+      if (toUnit === 'K') targetVal = tempInC + 273.15;
+
+      setConvertResult(Math.round(targetVal * 10000) / 10000);
+      return;
+    }
+
+    // 그 외 물리 단위
+    const rates = conversionRates[type];
+    const valInBase = numVal / rates[fromUnit];
+    const targetVal = valInBase * rates[toUnit];
+    setConvertResult(Math.round(targetVal * 1000000) / 1000000);
+  };
+
+  useEffect(() => {
+    // 타입 바뀔 때 자동 단위 셋팅 및 실행
+    let defaultFrom = 'm';
+    let defaultTo = 'cm';
+    if (converterType === 'weight') { defaultFrom = 'kg'; defaultTo = 'g'; }
+    if (converterType === 'area') { defaultFrom = 'm2'; defaultTo = 'pyeong'; }
+    if (converterType === 'temp') { defaultFrom = 'C'; defaultTo = 'F'; }
+
+    setConvertFromUnit(defaultFrom);
+    setConvertToUnit(defaultTo);
+    setConvertResult('');
+  }, [converterType]);
+
+  useEffect(() => {
+    handleConvert(convertFrom, convertFromUnit, convertToUnit, converterType);
+  }, [convertFrom, convertFromUnit, convertToUnit, converterType]);
+
+
+  return (
+    <div className={`min-h-screen flex flex-col transition-colors duration-300 ${isDarkMode ? 'bg-slate-900 text-slate-100' : 'bg-slate-50 text-slate-800'}`}>
+      
+      {/* 토스트 알림창 */}
+      {toastMessage && (
+        <div className="fixed top-4 left-1/2 transform -translate-x-1/2 z-50 bg-blue-600 text-white px-5 py-3 rounded-xl shadow-2xl flex items-center gap-2 animate-bounce">
+          <Info size={18} />
+          <span className="text-sm font-medium">{toastMessage}</span>
+        </div>
+      )}
+
+      {/* 헤더 및 내비게이션 바 */}
+      <header className={`border-b px-4 py-3 flex flex-wrap items-center justify-between gap-4 sticky top-0 z-40 backdrop-blur-md ${isDarkMode ? 'bg-slate-950/80 border-slate-800' : 'bg-white/80 border-slate-200'}`}>
+        <div className="flex items-center gap-3">
+          <div className="p-2 bg-blue-600 rounded-lg text-white">
+            <Calculator size={22} className="animate-pulse" />
+          </div>
+          <div>
+            <h1 className="font-bold text-lg leading-tight tracking-wider">공학용 멀티 계산기</h1>
+            <p className="text-xs text-slate-400">Premium Utility Platform</p>
+          </div>
+        </div>
+
+        {/* 탭 컨트롤러 */}
+        <div className={`flex rounded-xl p-1 text-xs sm:text-sm font-medium ${isDarkMode ? 'bg-slate-800' : 'bg-slate-200'}`}>
+          <button 
+            onClick={() => setActiveTab('calc')}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all ${activeTab === 'calc' ? (isDarkMode ? 'bg-slate-700 text-blue-400 font-semibold shadow' : 'bg-white text-blue-600 font-semibold shadow') : 'text-slate-400 hover:text-slate-200'}`}
+          >
+            <Calculator size={15} />
+            <span>공학용 계산기</span>
+          </button>
+          <button 
+            onClick={() => setActiveTab('graph')}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all ${activeTab === 'graph' ? (isDarkMode ? 'bg-slate-700 text-blue-400 font-semibold shadow' : 'bg-white text-blue-600 font-semibold shadow') : 'text-slate-400 hover:text-slate-200'}`}
+          >
+            <TrendingUp size={15} />
+            <span>2D 그래프</span>
+          </button>
+          <button 
+            onClick={() => setActiveTab('converter')}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all ${activeTab === 'converter' ? (isDarkMode ? 'bg-slate-700 text-blue-400 font-semibold shadow' : 'bg-white text-blue-600 font-semibold shadow') : 'text-slate-400 hover:text-slate-200'}`}
+          >
+            <Scale size={15} />
+            <span>단위 변환기</span>
+          </button>
+        </div>
+
+        {/* 테마 토글 및 상태 제어 */}
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setIsDarkMode(!isDarkMode)}
+            className={`p-2 rounded-xl transition-all ${isDarkMode ? 'hover:bg-slate-800 text-yellow-400' : 'hover:bg-slate-100 text-indigo-600'}`}
+            title="다크/라이트 테마 변경"
+          >
+            {isDarkMode ? <Sun size={20} /> : <Moon size={20} />}
+          </button>
+        </div>
+      </header>
+
+      {/* 메인 내용 영역 */}
+      <main className="flex-1 max-w-7xl w-full mx-auto p-4 flex flex-col md:flex-row gap-6">
+        
+        {/* ==================== 탭 1: 공학용 계산기 ==================== */}
+        {activeTab === 'calc' && (
+          <div className="flex-1 flex flex-col lg:flex-row gap-6 w-full">
+            
+            {/* 메인 계산기 카드 */}
+            <div className={`flex-1 rounded-3xl overflow-hidden shadow-2xl flex flex-col max-w-4xl mx-auto w-full transition-all border ${isDarkMode ? 'bg-slate-950/70 border-slate-800' : 'bg-white border-slate-100'}`}>
+              
+              {/* 상단 컨트롤러 (DEG/RAD, 메모리 클리어) */}
+              <div className="px-6 py-3 flex items-center justify-between border-b border-slate-800/20">
+                <button 
+                  onClick={() => setIsRad(!isRad)} 
+                  className={`px-3 py-1 text-xs font-bold rounded-lg tracking-wider transition-colors ${isRad ? 'bg-blue-600/20 text-blue-400 border border-blue-500/30' : 'bg-slate-600/20 text-slate-400 border border-slate-500/30'}`}
+                >
+                  {isRad ? 'RAD (라디안)' : 'DEG (도)'}
+                </button>
+
+                <div className="flex gap-2">
+                  <span className={`text-[10px] font-mono px-2 py-0.5 rounded ${memory !== 0 ? 'bg-yellow-500/20 text-yellow-500' : 'text-slate-500'}`}>
+                    M = {memory}
+                  </span>
+                </div>
+              </div>
+
+              {/* 계산기 디스플레이 */}
+              <div className={`p-6 flex flex-col justify-end text-right min-h-[140px] gap-2 ${isDarkMode ? 'bg-slate-950' : 'bg-slate-50'}`}>
+                {formula && (
+                  <div className="text-sm font-mono text-slate-400 truncate tracking-wide">
+                    {formula}
+                  </div>
+                )}
+                <div className="text-3xl md:text-4xl font-semibold font-mono truncate select-all tracking-wider">
+                  {display || '0'}
+                </div>
+                {calcError && (
+                  <div className="text-xs font-semibold text-rose-500 bg-rose-500/10 px-2 py-1 rounded w-fit ml-auto mt-1">
+                    {calcError}
+                  </div>
+                )}
+              </div>
+
+              {/* 키패드 그리드 */}
+              <div className="p-4 md:p-6 grid grid-cols-10 gap-2 select-none">
+                {/* 왼쪽 4개 열: 공학용 특수 키 */}
+                <div className="col-span-10 md:col-span-4 grid grid-cols-4 gap-1.5 md:border-r md:pr-4 border-slate-800/30">
+                  <button onClick={() => handleKey('MC')} className="btn-sci">MC</button>
+                  <button onClick={() => handleKey('MR')} className="btn-sci">MR</button>
+                  <button onClick={() => handleKey('M+')} className="btn-sci">M+</button>
+                  <button onClick={() => handleKey('M-')} className="btn-sci">M-</button>
+                  
+                  <button onClick={() => handleKey('MS')} className="btn-sci">MS</button>
+                  <button onClick={() => handleKey('sin')} className="btn-sci">sin</button>
+                  <button onClick={() => handleKey('cos')} className="btn-sci">cos</button>
+                  <button onClick={() => handleKey('tan')} className="btn-sci">tan</button>
+                  
+                  <button onClick={() => handleKey('asin')} className="btn-sci text-[10px] sm:text-xs">asin</button>
+                  <button onClick={() => handleKey('acos')} className="btn-sci text-[10px] sm:text-xs">acos</button>
+                  <button onClick={() => handleKey('atan')} className="btn-sci text-[10px] sm:text-xs">atan</button>
+                  <button onClick={() => handleKey('ln')} className="btn-sci">ln</button>
+                  
+                  <button onClick={() => handleKey('log')} className="btn-sci">log</button>
+                  <button onClick={() => handleKey('x²')} className="btn-sci">x²</button>
+                  <button onClick={() => handleKey('x³')} className="btn-sci">x³</button>
+                  <button onClick={() => handleKey('x^y')} className="btn-sci">x^y</button>
+
+                  <button onClick={() => handleKey('sqrt')} className="btn-sci">√</button>
+                  <button onClick={() => handleKey('cbrt')} className="btn-sci">³√</button>
+                  <button onClick={() => handleKey('1/x')} className="btn-sci">1/x</button>
+                  <button onClick={() => handleKey('!')} className="btn-sci">x!</button>
+
+                  <button onClick={() => handleKey('π')} className="btn-sci">π</button>
+                  <button onClick={() => handleKey('e')} className="btn-sci">e</button>
+                  <button onClick={() => handleKey('e^x')} className="btn-sci">e^x</button>
+                  <button onClick={() => handleKey('10^x')} className="btn-sci">10^x</button>
+                </div>
+
+                {/* 오른쪽 6개 열: 기본 연산자 & 숫자 키패드 */}
+                <div className="col-span-10 md:col-span-6 grid grid-cols-4 gap-1.5 md:pl-2">
+                  <button onClick={() => handleKey('AC')} className="btn-clear text-rose-500 font-bold">AC</button>
+                  <button onClick={() => handleKey('(')} className="btn-op font-bold">(</button>
+                  <button onClick={() => handleKey(')')} className="btn-op font-bold">)</button>
+                  <button onClick={() => handleKey('Del')} className="btn-op font-bold flex items-center justify-center text-amber-500">
+                    <Delete size={18} />
+                  </button>
+
+                  <button onClick={() => handleKey('7')} className="btn-num">7</button>
+                  <button onClick={() => handleKey('8')} className="btn-num">8</button>
+                  <button onClick={() => handleKey('9')} className="btn-num">9</button>
+                  <button onClick={() => handleKey('÷')} className="btn-op font-bold text-xl">÷</button>
+
+                  <button onClick={() => handleKey('4')} className="btn-num">4</button>
+                  <button onClick={() => handleKey('5')} className="btn-num">5</button>
+                  <button onClick={() => handleKey('6')} className="btn-num">6</button>
+                  <button onClick={() => handleKey('×')} className="btn-op font-bold text-xl">×</button>
+
+                  <button onClick={() => handleKey('1')} className="btn-num">1</button>
+                  <button onClick={() => handleKey('2')} className="btn-num">2</button>
+                  <button onClick={() => handleKey('3')} className="btn-num">3</button>
+                  <button onClick={() => handleKey('-')} className="btn-op font-bold text-xl">-</button>
+
+                  <button onClick={() => handleKey('0')} className="btn-num col-span-2">0</button>
+                  <button onClick={() => handleKey('.')} className="btn-num font-bold">.</button>
+                  <button onClick={() => handleKey('+')} className="btn-op font-bold text-xl">+</button>
+
+                  <button onClick={() => handleKey('=')} className="btn-equal col-span-4">=</button>
+                </div>
+              </div>
+            </div>
+
+            {/* 히스토리 사이드 패널 */}
+            <div className={`w-full lg:w-80 rounded-3xl p-5 border flex flex-col gap-4 ${isDarkMode ? 'bg-slate-950/40 border-slate-800' : 'bg-white border-slate-200'}`}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 font-semibold">
+                  <History size={16} />
+                  <span>최근 계산 기록</span>
+                </div>
+                {history.length > 0 && (
+                  <button 
+                    onClick={() => setHistory([])}
+                    className="text-xs text-rose-500 hover:underline flex items-center gap-1"
+                  >
+                    <RotateCcw size={12} /> 전체 비우기
+                  </button>
+                )}
+              </div>
+
+              <div className="flex-1 overflow-y-auto max-h-[300px] lg:max-h-[500px] flex flex-col gap-2.5 pr-1">
+                {history.length === 0 ? (
+                  <div className="text-center text-xs text-slate-500 py-12">
+                    기록이 비어있습니다.
+                  </div>
+                ) : (
+                  history.map((item, idx) => (
+                    <div 
+                      key={idx}
+                      onClick={() => {
+                        setDisplay(item.result);
+                        setFormula(item.formula);
+                      }}
+                      className={`p-3 rounded-xl cursor-pointer transition-all text-right group border ${isDarkMode ? 'bg-slate-900/60 hover:bg-slate-800/80 border-slate-800' : 'bg-slate-50 hover:bg-slate-100 border-slate-100'}`}
+                    >
+                      <div className="text-xs text-slate-500 truncate group-hover:text-blue-400">{item.formula}</div>
+                      <div className="text-lg font-semibold font-mono tracking-wide truncate">{item.result}</div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+          </div>
+        )}
+
+        {/* ==================== 탭 2: 2D 그래프 플로터 ==================== */}
+        {activeTab === 'graph' && (
+          <div className="flex-1 flex flex-col gap-4 w-full">
+            <div className={`p-4 rounded-3xl border flex flex-col gap-4 ${isDarkMode ? 'bg-slate-950/70 border-slate-800' : 'bg-white border-slate-200'}`}>
+              
+              {/* 입력 컨트롤 */}
+              <div className="flex flex-col sm:flex-row gap-3 items-center">
+                <div className="w-full sm:flex-1 relative">
+                  <span className="absolute left-4 top-1/2 -translate-y-1/2 font-mono text-sm font-semibold text-blue-500">f(x) =</span>
+                  <input
+                    type="text"
+                    value={graphEquation}
+                    onChange={(e) => setGraphEquation(e.target.value)}
+                    placeholder="예: sin(x) + cos(x), x^2 - 4"
+                    className={`w-full pl-16 pr-4 py-3 rounded-2xl border text-sm font-semibold transition-all ${isDarkMode ? 'bg-slate-900 border-slate-800 text-slate-100 focus:border-blue-500' : 'bg-slate-50 border-slate-200 text-slate-800 focus:border-blue-500'}`}
+                  />
+                </div>
+                
+                {/* 줌 제어 단추 */}
+                <div className="flex gap-2">
+                  <button 
+                    onClick={() => setGraphZoom(prev => Math.min(prev + 10, 200))}
+                    className="p-3 rounded-2xl bg-blue-600/10 text-blue-500 hover:bg-blue-600/20 transition-all"
+                    title="확대"
+                  >
+                    <ZoomIn size={18} />
+                  </button>
+                  <button 
+                    onClick={() => setGraphZoom(prev => Math.max(prev - 10, 10))}
+                    className="p-3 rounded-2xl bg-blue-600/10 text-blue-500 hover:bg-blue-600/20 transition-all"
+                    title="축소"
+                  >
+                    <ZoomOut size={18} />
+                  </button>
+                  <button 
+                    onClick={() => { setGraphOffset({ x: 0, y: 0 }); setGraphZoom(40); }}
+                    className="p-3 rounded-2xl bg-slate-600/10 text-slate-400 hover:bg-slate-600/20 transition-all"
+                    title="원점 리셋"
+                  >
+                    <RotateCcw size={18} />
+                  </button>
+                </div>
+              </div>
+
+              {/* 그래프 설명 및 도움말 */}
+              <div className={`p-3 rounded-xl text-xs flex gap-2 items-center ${isDarkMode ? 'bg-slate-900 text-slate-400' : 'bg-slate-100 text-slate-600'}`}>
+                <Info size={14} className="text-blue-500 flex-shrink-0" />
+                <p>마우스 드래그 혹은 터치 스크롤로 그래프 화면을 자유롭게 이동할 수 있습니다. 곱셈 기호 `*`를 꼭 작성해 주세요 (예: 2*x).</p>
+              </div>
+
+              {/* 캔버스 드로잉 영역 */}
+              <div className="relative overflow-hidden rounded-2xl border border-slate-700/30 flex-1 min-h-[350px]">
+                <canvas
+                  ref={canvasRef}
+                  onMouseDown={handleMouseDown}
+                  onMouseMove={handleMouseMove}
+                  onMouseUp={handleMouseUp}
+                  onMouseLeave={handleMouseUp}
+                  onTouchStart={handleTouchStart}
+                  onTouchMove={handleTouchMove}
+                  onTouchEnd={handleMouseUp}
+                  className="w-full cursor-move"
+                />
+              </div>
+
+              {/* 템플릿 추천 버튼 */}
+              <div className="flex flex-wrap gap-2 items-center">
+                <span className="text-xs text-slate-500 font-semibold">추천 그래프식:</span>
+                {[
+                  'sin(x)',
+                  'cos(x)',
+                  'x^2 - 2*x',
+                  'x^3 - 3*x',
+                  'abs(x)',
+                  'sin(x)*cos(x)'
+                ].map((eq) => (
+                  <button
+                    key={eq}
+                    onClick={() => setGraphEquation(eq)}
+                    className="px-2.5 py-1 rounded-lg text-xs bg-slate-500/10 hover:bg-slate-500/20 transition-colors"
+                  >
+                    {eq}
+                  </button>
+                ))}
+              </div>
+
+            </div>
+          </div>
+        )}
+
+        {/* ==================== 탭 3: 단위 변환기 ==================== */}
+        {activeTab === 'converter' && (
+          <div className="flex-1 max-w-3xl mx-auto w-full">
+            <div className={`p-6 rounded-3xl border flex flex-col gap-6 ${isDarkMode ? 'bg-slate-950/70 border-slate-800' : 'bg-white border-slate-200'}`}>
+              
+              <h2 className="text-lg font-bold">스마트 대화형 단위 변환기</h2>
+
+              {/* 변환 종류 선택 */}
+              <div className="grid grid-cols-4 gap-2">
+                {[
+                  { id: 'length', label: '길이', icon: '📏' },
+                  { id: 'weight', label: '무게', icon: '⚖️' },
+                  { id: 'area', label: '넓이', icon: '📐' },
+                  { id: 'temp', label: '온도', icon: '🌡️' }
+                ].map((tab) => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setConverterType(tab.id)}
+                    className={`p-3 rounded-2xl border text-center transition-all flex flex-col items-center gap-1.5 ${converterType === tab.id ? 'border-blue-500 bg-blue-500/10 text-blue-500 font-semibold' : 'border-slate-800/20 hover:bg-slate-500/5'}`}
+                  >
+                    <span className="text-xl">{tab.icon}</span>
+                    <span className="text-xs">{tab.label}</span>
+                  </button>
+                ))}
+              </div>
+
+              {/* 대화형 폼 UI */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center my-4">
+                
+                {/* 입력 부분 */}
+                <div className="flex flex-col gap-2">
+                  <label className="text-xs text-slate-400 font-semibold">다음 값을 변환:</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="number"
+                      value={convertFrom}
+                      onChange={(e) => setConvertFrom(e.target.value)}
+                      placeholder="수치 입력"
+                      className={`flex-1 p-3 rounded-xl border text-sm font-semibold transition-all ${isDarkMode ? 'bg-slate-900 border-slate-800 focus:border-blue-500' : 'bg-slate-50 border-slate-200 focus:border-blue-500'}`}
+                    />
+                    
+                    <select
+                      value={convertFromUnit}
+                      onChange={(e) => setConvertFromUnit(e.target.value)}
+                      className={`p-3 rounded-xl border text-xs font-semibold ${isDarkMode ? 'bg-slate-900 border-slate-800 text-slate-100' : 'bg-slate-50 border-slate-200 text-slate-800'}`}
+                    >
+                      {converterType === 'length' && (
+                        <>
+                          <option value="m">미터 (m)</option>
+                          <option value="cm">센티미터 (cm)</option>
+                          <option value="mm">밀리미터 (mm)</option>
+                          <option value="km">킬로미터 (km)</option>
+                          <option value="inch">인치 (inch)</option>
+                          <option value="ft">피트 (ft)</option>
+                          <option value="yd">야드 (yd)</option>
+                          <option value="mile">마일 (mile)</option>
+                        </>
+                      )}
+                      {converterType === 'weight' && (
+                        <>
+                          <option value="kg">킬로그램 (kg)</option>
+                          <option value="g">그램 (g)</option>
+                          <option value="mg">밀리그램 (mg)</option>
+                          <option value="lb">파운드 (lb)</option>
+                          <option value="oz">온스 (oz)</option>
+                        </>
+                      )}
+                      {converterType === 'area' && (
+                        <>
+                          <option value="m2">제곱미터 (㎡)</option>
+                          <option value="cm2">제곱센티미터 (㎠)</option>
+                          <option value="km2">제곱킬로미터 (㎢)</option>
+                          <option value="ha">헥타르 (ha)</option>
+                          <option value="acre">에이커 (acre)</option>
+                          <option value="pyeong">평 (坪)</option>
+                        </>
+                      )}
+                      {converterType === 'temp' && (
+                        <>
+                          <option value="C">섭씨 (°C)</option>
+                          <option value="F">화씨 (°F)</option>
+                          <option value="K">절대온도 (K)</option>
+                        </>
+                      )}
+                    </select>
+                  </div>
+                </div>
+
+                {/* 결과 부분 */}
+                <div className="flex flex-col gap-2">
+                  <label className="text-xs text-slate-400 font-semibold">이 단위로 변환:</label>
+                  <div className="flex gap-2">
+                    <div className={`flex-1 p-3 rounded-xl border text-sm font-semibold select-all font-mono flex items-center min-h-[46px] ${isDarkMode ? 'bg-slate-950 border-slate-800' : 'bg-slate-100 border-slate-200'}`}>
+                      {convertResult !== '' ? convertResult : '결과 자동 계산'}
+                    </div>
+
+                    <select
+                      value={convertToUnit}
+                      onChange={(e) => setConvertToUnit(e.target.value)}
+                      className={`p-3 rounded-xl border text-xs font-semibold ${isDarkMode ? 'bg-slate-900 border-slate-800 text-slate-100' : 'bg-slate-50 border-slate-200 text-slate-800'}`}
+                    >
+                      {converterType === 'length' && (
+                        <>
+                          <option value="m">미터 (m)</option>
+                          <option value="cm">센티미터 (cm)</option>
+                          <option value="mm">밀리미터 (mm)</option>
+                          <option value="km">킬로미터 (km)</option>
+                          <option value="inch">인치 (inch)</option>
+                          <option value="ft">피트 (ft)</option>
+                          <option value="yd">야드 (yd)</option>
+                          <option value="mile">마일 (mile)</option>
+                        </>
+                      )}
+                      {converterType === 'weight' && (
+                        <>
+                          <option value="kg">킬로그램 (kg)</option>
+                          <option value="g">그램 (g)</option>
+                          <option value="mg">밀리그램 (mg)</option>
+                          <option value="lb">파운드 (lb)</option>
+                          <option value="oz">온스 (oz)</option>
+                        </>
+                      )}
+                      {converterType === 'area' && (
+                        <>
+                          <option value="m2">제곱미터 (㎡)</option>
+                          <option value="cm2">제곱센티미터 (㎠)</option>
+                          <option value="km2">제곱킬로미터 (㎢)</option>
+                          <option value="ha">헥타르 (ha)</option>
+                          <option value="acre">에이커 (acre)</option>
+                          <option value="pyeong">평 (坪)</option>
+                        </>
+                      )}
+                      {converterType === 'temp' && (
+                        <>
+                          <option value="C">섭씨 (°C)</option>
+                          <option value="F">화씨 (°F)</option>
+                          <option value="K">절대온도 (K)</option>
+                        </>
+                      )}
+                    </select>
+                  </div>
+                </div>
+
+              </div>
+
+            </div>
+          </div>
+        )}
+
+      </main>
+
+      {/* 푸터 영역 */}
+      <footer className={`py-4 text-center border-t text-xs ${isDarkMode ? 'bg-slate-950/80 border-slate-800 text-slate-500' : 'bg-slate-100 border-slate-200 text-slate-400'}`}>
+        <p>© 2026 Premium Math Platform. All Rights Reserved.</p>
+      </footer>
+    </div>
+  );
+}
+
+```
